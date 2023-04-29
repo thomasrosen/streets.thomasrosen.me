@@ -44,8 +44,19 @@ const levenshtein = require('damerau-levenshtein')
 // }
 // get_gender_with_huggingface()
 
+function simplify_streetname(streetname) {
+  return streetname
+    .toLowerCase()
+    .replace(/[-\/\.,’0-9\(\)\[\]  ]/g, ' ')
+    .replace(/ß/g, 'ss')
+    .replace(/(?:\s|^)(?:von|am|an|der|die|das|des|den|zu|zur|zum|im|in|nach|alt|st\.)(?=\s|$)/g, ' ')
+    .replace(/(?:straße|strasse|weg|allee|pfad|chaussee|graben|gasse|damm|platz|ring|brücke|kanal|kolonie|steig|teich|treppe|kirche|terrasse|stieg|berg|remise|ufer|see|hof|dorf|werder|heide|groß|gross|klein|siedlung|horst|süd|nord|ost|west|park)(?:\s|$)/g, ' ')
+    .replace(/\s+/, ' ')
+    .trim()
+}
 
 const names_cache = {}
+const full_names_cache = {}
 function load_names(filename) { // filename = m / f / u
   if (names_cache[filename]) {
     return names_cache[filename]
@@ -56,61 +67,142 @@ function load_names(filename) { // filename = m / f / u
     .split(/[\r\n]/) // split by linebreak
     .filter(Boolean) // remove empty lines
     .flatMap(name => [name, ...name.split('-')]) // Split double names (e.g. "Jan-Olaf") into two names (e.g. "Jan" and "Olaf") but also keep the original name ("Jan-Olaf").
-    .map(name => name.toLowerCase().trim()) // lowercase
+    .map(name => name.trim()) // lowercase
   names = [...new Set(names)] // remove duplicates
 
   names_cache[filename] = names
 
   return names // return array
 }
-function matching_names_count(names, streetname) {
-  return (
+function load_full_names(filename) { // filename = m / f / u
+  if (full_names_cache[filename]) {
+    return full_names_cache[filename]
+  }
+
+  let names = fs.readFileSync(`./data_names/full_names_${filename}.txt`, 'utf8') // read file
+    .toLowerCase() // convert to lowercase
+    .split(/[\r\n]/) // split by linebreak
+    .filter(Boolean) // remove empty lines
+    // .flatMap(name => [name, ...name.split(/[\-\s]/g)]) // split into any name part
+    .map(name => simplify_streetname(name).trim())
+  names = [...new Set(names)] // remove duplicates
+
+  console.log('names', names)
+
+  full_names_cache[filename] = names
+
+  return names // return array
+}
+function matching_names_count(names, streetname, options = {}) {
+
+  const {
+    min_similarity = 0.9,
+  } = options
+
+  // let check = false
+  // if (streetname === 'alten' || streetname === 'fried') {
+  //   check = true
+  // }
+
+  const first_letter = streetname[0]
+
+  let res = (
     names
-    .map(name => levenshtein(name, streetname))
-    .filter(distance => distance.similarity > 0.8)
-    .map(distance => distance.similarity)
-    .reduce((acc, similarity) => acc + similarity, 0)
+      .filter(name => name[0] === first_letter)
+      .map(name => ({
+        streetname: streetname,
+        name: name,
+        distance: levenshtein(name, streetname)
+      }))
+      .filter(({ distance }) => distance.similarity > min_similarity)
   )
+
+  // if (check) { // && res.length > 0
+  //   console.log(names[0][0], streetname, res)
+  // }
+
+  res = res
+    .map(({ distance }) => distance.similarity)
+
+  if (res.length === 0) {
+    res = [0]
+  }
+
+  const max = Math.max(0, ...res)
+  const sum = res.reduce((acc, similarity) => acc + similarity, 0)
+  const avg = sum / res.length
+  const score = max + avg * 0.1 // if the max is the same for female and male, the amount of positive names will also be used
+
+  if (score > 1.1) {
+    console.log(names[0][0], streetname, score)
+  }
+
+  // if (check) { // && res.length > 0
+  //   console.log(names[0][0], streetname, score, max, sum, avg)
+  // }
+
+  return score
 }
-function simplify_streetname(streetname) {
-  return streetname
-    .toLowerCase()
-    .replace(/(\s|^)(von|am|an|der|die|das|des|den|zu|zur|zum|im|in|nach|alt)(\s|$)/g, ' ')
-    .replace(/(straße|strasse|weg|allee|pfad|chaussee|graben|gasse|damm|platz|ring|brücke|kanal|kolonie|steig|teich|treppe|kirche|terrasse|stieg|berg|remise|ufer|see|hof|dorf|werder)/g, ' ')
-    .replace(/[-\/]/g, ' ')
-    .replace(/\s+/, ' ')
-    .trim()
-}
+
 async function get_gender(streetname) {
   streetname = simplify_streetname(streetname)
+
+  if (streetname.length < 3) {
+    return {
+      f: 0,
+      m: 0,
+    }
+  }
+
+  const streetname_parts = simplify_streetname(streetname)
     .split(' ')
     .filter(Boolean)
 
-  // const names_u = load_names('u') // unisex
-  const names_f = load_names('f') // female
+  const names_f = [
+    ...load_names('u'), // unisex
+    ...load_names('f'), // female
+  ]
   const names_m = load_names('m') // male
 
-  let gender_result_counts = streetname
+  let gender_result_counts = streetname_parts
   .map(sn => ({
-    // u: matching_names_count(names_u, sn),
     f: matching_names_count(names_f, sn),
     m: matching_names_count(names_m, sn),
   }))
   .filter(sn => 
-    // sn.u !== 0 ||
     sn.f !== 0 ||
     sn.m !== 0
   )
   .reduce((acc, sn) => {
-    // acc.u += sn.u
     acc.f += sn.f
     acc.m += sn.m
     return acc
   }, {
-    // u: 0,
     f: 0,
     m: 0,
   })
+
+  // let gap = false
+  // if (gender_result_counts.f !== 0) {
+  //   console.log('gender_result_counts.f-1', gender_result_counts.f)
+  //   console.log('gender_result_counts.m-1', gender_result_counts.m)
+  //   gap = true
+  // }
+  const full_names_f = load_full_names('f')
+  const full_names_m = load_full_names('m')
+  const full_names_options = { min_similarity: 0.9 }
+  gender_result_counts.f += matching_names_count(full_names_f, streetname, full_names_options)
+  gender_result_counts.m += matching_names_count(full_names_m, streetname, full_names_options)
+
+  // if (gender_result_counts.f !== 0) {
+  //   console.log('gender_result_counts.f-2', gender_result_counts.f)
+  //   console.log('gender_result_counts.m-2', gender_result_counts.m)
+  //   gap = true
+  // }
+  // if (gap) {
+  //   console.log(' ')
+  // }
+
 
   const gender_results_sorted = Object.entries(gender_result_counts)
     .sort((a, b) => b[1] - a[1])
